@@ -115,7 +115,7 @@ install_for_linux() {
 
     # Verify SHA256 integrity if a known hash is available
     if [[ -n "${expected_sha256}" ]]; then
-      echo "${expected_sha256}  ${pritunl_install_file}" | shasum -a 256 -c -
+      echo "${expected_sha256}  ${pritunl_install_file}" | sha256sum -c -
     else
       echo -e "${TTY_YELLOW_NORMAL}Warning: no pinned SHA256 for pritunl-client ${PRITUNL_CLIENT_VERSION}/${distro_codename} — skipping integrity check.${TTY_COLOR_RESET}"
     fi
