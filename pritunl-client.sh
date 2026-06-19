@@ -91,17 +91,34 @@ install_for_linux() {
     # Define distributed installable file
     local pritunl_install_file
     local deb_url
+    local distro_codename
+    local expected_sha256
 
     # Validate client version
     validate_client_version "${PRITUNL_CLIENT_VERSION}"
 
+    distro_codename="$(lsb_release -cs)"
+
     # Set install file path
     pritunl_install_file="${RUNNER_TEMP}/pritunl-client.deb"
-    # Set download URL
-    deb_url="https://github.com/pritunl/pritunl-client-electron/releases/download/${PRITUNL_CLIENT_VERSION}/pritunl-client_${PRITUNL_CLIENT_VERSION}-0ubuntu1.$(lsb_release -cs)_amd64.deb"
+    # Set download URL — releases are served from pritunl/pritunl-client since v1.3.3884.0
+    deb_url="https://github.com/pritunl/pritunl-client/releases/download/${PRITUNL_CLIENT_VERSION}/pritunl-client_${PRITUNL_CLIENT_VERSION}-0ubuntu1.${distro_codename}_amd64.deb"
+
+    # Look up the pinned SHA256 for the requested version + distro codename.
+    # When the action is run with client-version set to the pinned version these
+    # values are verified before installation; for any other (unknown) version
+    # the check is skipped with a warning so the action degrades gracefully.
+    expected_sha256="$(lookup_linux_deb_sha256 "${PRITUNL_CLIENT_VERSION}" "${distro_codename}")"
 
     # Download the Debian package
-    curl -sSL "$deb_url" -o "$pritunl_install_file"
+    curl -fsSL "$deb_url" -o "$pritunl_install_file"
+
+    # Verify SHA256 integrity if a known hash is available
+    if [[ -n "${expected_sha256}" ]]; then
+      echo "${expected_sha256}  ${pritunl_install_file}" | shasum -a 256 -c -
+    else
+      echo -e "${TTY_YELLOW_NORMAL}Warning: no pinned SHA256 for pritunl-client ${PRITUNL_CLIENT_VERSION}/${distro_codename} — skipping integrity check.${TTY_COLOR_RESET}"
+    fi
 
     # Install using APT package handling utility
     if sudo apt-get install -qq -o=Dpkg::Use-Pty=0 -y "$pritunl_install_file"; then
@@ -137,16 +154,27 @@ install_for_macos() {
     # Define install file and URL
     local pritunl_install_file
     local pkg_zip_url
+    local expected_sha256
 
     # Validate client version
     validate_client_version "${PRITUNL_CLIENT_VERSION}"
 
-    # Set install file path and download URL
+    # Set install file path and download URL — releases served from pritunl/pritunl-client since v1.3.3884.0
     pritunl_install_file="${RUNNER_TEMP}/Pritunl.pkg.zip"
-    pkg_zip_url="https://github.com/pritunl/pritunl-client-electron/releases/download/${PRITUNL_CLIENT_VERSION}/Pritunl.pkg.zip"
+    pkg_zip_url="https://github.com/pritunl/pritunl-client/releases/download/${PRITUNL_CLIENT_VERSION}/Pritunl.pkg.zip"
+
+    # Look up the pinned SHA256 for the requested version
+    expected_sha256="$(lookup_macos_pkg_sha256 "${PRITUNL_CLIENT_VERSION}")"
 
     # Download the package
-    curl -sSL "$pkg_zip_url" -o "$pritunl_install_file"
+    curl -fsSL "$pkg_zip_url" -o "$pritunl_install_file"
+
+    # Verify SHA256 integrity if a known hash is available
+    if [[ -n "${expected_sha256}" ]]; then
+      echo "${expected_sha256}  ${pritunl_install_file}" | shasum -a 256 -c -
+    else
+      echo -e "${TTY_YELLOW_NORMAL}Warning: no pinned SHA256 for Pritunl.pkg.zip ${PRITUNL_CLIENT_VERSION} — skipping integrity check.${TTY_COLOR_RESET}"
+    fi
 
     # Unzip the package
     unzip -qq -o "$pritunl_install_file" -d "${RUNNER_TEMP}"
@@ -194,16 +222,35 @@ install_for_windows() {
     # Define install file and URL
     local pritunl_install_file
     local exe_url
+    local expected_sha256
 
     # Validate client version
     validate_client_version "${PRITUNL_CLIENT_VERSION}"
 
-    # Set install file path and download URL
+    # Set install file path and download URL — releases served from pritunl/pritunl-client since v1.3.3884.0
     pritunl_install_file="${RUNNER_TEMP}\Pritunl.exe"
-    exe_url="https://github.com/pritunl/pritunl-client-electron/releases/download/${PRITUNL_CLIENT_VERSION}/Pritunl.exe"
+    exe_url="https://github.com/pritunl/pritunl-client/releases/download/${PRITUNL_CLIENT_VERSION}/Pritunl.exe"
+
+    # Look up the pinned SHA256 for the requested version
+    expected_sha256="$(lookup_windows_exe_sha256 "${PRITUNL_CLIENT_VERSION}")"
 
     # Download the executable
-    curl -sSL "$exe_url" -o "$pritunl_install_file"
+    curl -fsSL "$exe_url" -o "$pritunl_install_file"
+
+    # Verify SHA256 integrity if a known hash is available using PowerShell Get-FileHash
+    if [[ -n "${expected_sha256}" ]]; then
+      pwsh -ExecutionPolicy Bypass -Command "
+        \$actual = (Get-FileHash -Algorithm SHA256 -Path '$pritunl_install_file').Hash.ToLower()
+        \$expected = '${expected_sha256}'.ToLower()
+        if (\$actual -ne \$expected) {
+          Write-Error \"SHA256 mismatch for Pritunl.exe: expected \$expected but got \$actual\"
+          exit 1
+        }
+        Write-Host 'SHA256 OK: ' + \$actual
+      "
+    else
+      echo -e "${TTY_YELLOW_NORMAL}Warning: no pinned SHA256 for Pritunl.exe ${PRITUNL_CLIENT_VERSION} — skipping integrity check.${TTY_COLOR_RESET}"
+    fi
 
     # Install using Ad hoc PowerShell Script
     if pwsh -ExecutionPolicy Bypass -Command "Start-Process -FilePath '$pritunl_install_file' -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' -Wait"; then
@@ -774,6 +821,46 @@ pluralize_word() {
     # If the count is not 1, return the plural form of the word (by appending 's')
     echo "${2}s"
   fi
+}
+
+# SHA256 hash lookup for pinned pritunl-client releases
+# -------------------------------------------------------
+# Hashes were computed by downloading each artifact and running:
+#   shasum -a 256 <file>
+# on a macOS host (2026-06-19). Add new entries here when bumping the
+# pinned version so the integrity check has a known-good value to compare
+# against. Unknown version/codename combinations fall back to a warning.
+#
+# Pinned version: 1.3.4655.98 (released 2026-06-11)
+# Download base: https://github.com/pritunl/pritunl-client/releases/download/
+# -------------------------------------------------------
+
+lookup_linux_deb_sha256() {
+  local version="$1"
+  local codename="$2"
+  case "${version}/${codename}" in
+  "1.3.4655.98/jammy")  echo "089fabb16fa5edb0ef61fc58a48937d351302f6eb737617f96fef90ee4a664f5" ;;
+  "1.3.4655.98/noble")  echo "1da84cf8df88b4aa27739b2c16c2e1a52fd9917de3dcdedd63b0d89324db9242" ;;
+  "1.3.4655.98/focal")  echo "e19b0fd41ad10580a6bc3d8a6e1ab319537cb55d0305780250934c56dccbf6ab" ;;
+  "1.3.4655.98/bionic") echo "419bc2bf3696e127ddc04bb988ca33bf4ce270aad27cabb290a4265a1084f9f6" ;;
+  *) echo "" ;;
+  esac
+}
+
+lookup_macos_pkg_sha256() {
+  local version="$1"
+  case "${version}" in
+  "1.3.4655.98") echo "ecc85816b0646ef0f7ca51324065c56d44f5abcdc48dd6810cfef931e07066c7" ;;
+  *) echo "" ;;
+  esac
+}
+
+lookup_windows_exe_sha256() {
+  local version="$1"
+  case "${version}" in
+  "1.3.4655.98") echo "86555e22045e5ddd2cbefca58a91ed5d2d6035e23b34e819c84f6e99985d77a7" ;;
+  *) echo "" ;;
+  esac
 }
 
 # Installation process based on OS
